@@ -308,6 +308,13 @@ void ServiceEngine::rescanSubtree(const std::string& dir) {
     auto engine = safeEngine();
     if (!engine) return;
 
+    // An empty dir would make batchRescanPrefix tombstone the ENTIRE index
+    // (every absolute path matches the empty prefix). Skip instead.
+    if (dir.empty()) {
+        LOG_WARN("FSWatcher", "Skipping rescan: empty subtree path");
+        return;
+    }
+
     dispatch_async(mutationQueue_, ^{
         if (shuttingDown_.load(std::memory_order_relaxed)) return;
 
@@ -316,6 +323,14 @@ void ServiceEngine::rescanSubtree(const std::string& dir) {
         auto freshRecords = scanner->takeResults();
 
         if (shuttingDown_.load(std::memory_order_relaxed)) return;
+
+        // Root became unreachable (unmounted/deleted) between scheduling and
+        // scanning: the empty result set does NOT mean the files are gone.
+        // Skip reconciliation so a transient mount blip can't wipe the index.
+        if (scanner->hasFailed()) {
+            LOG_WARN("FSWatcher", "Skipping rescan reconcile: root unreachable: " << dir);
+            return;
+        }
 
         engine->batchRescanPrefix(dir, std::move(freshRecords));
 
