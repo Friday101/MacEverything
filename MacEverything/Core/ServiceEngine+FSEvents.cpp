@@ -1,5 +1,6 @@
 #include "ServiceEngine.h"
 #include "DirectoryScanner.h"
+#include "NetworkMounts.h"
 #include "RescanDebounce.h"
 #include "Logger.h"
 #include <sys/stat.h>
@@ -182,6 +183,31 @@ void ServiceEngine::startMonitoring() {
     });
 
     isMonitoring_.store(true, std::memory_order_relaxed);
+
+    // Periodic network volume rescan: FSEvents is unreliable on network
+    // filesystems (especially WebDAV), so mounted SMB/NFS/WebDAV volumes are
+    // re-reconciled on a slow cadence to keep their index entries fresh. The
+    // debounce + throttle pipeline absorbs collisions with event-driven
+    // rescans, and rescanSubtree skips reconciliation when a volume is
+    // unreachable, so an offline NAS can't wipe its own index entries.
+    if (!config_.scanNetworkVolumes) return;
+
+    networkRescanTimer_ = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, mutationQueue_);
+    dispatch_source_set_timer(networkRescanTimer_,
+        dispatch_time(DISPATCH_TIME_NOW,
+            static_cast<uint64_t>(kNetworkRescanInitialDelaySec * NSEC_PER_SEC)),
+        static_cast<uint64_t>(kNetworkRescanIntervalSec * NSEC_PER_SEC),
+        60 * NSEC_PER_SEC);
+    dispatch_source_set_event_handler(networkRescanTimer_, ^{
+        if (shuttingDown_.load(std::memory_order_relaxed)) return;
+        auto mounts = networkMountPoints();
+        if (mounts.empty()) return;
+        LOG_INFO("FSWatcher", "Periodic network volume rescan: "
+                 << mounts.size() << " mount(s)");
+        scheduleRescanForPaths(mounts);
+    });
+    dispatch_resume(networkRescanTimer_);
 }
 
 void ServiceEngine::stopMonitoring() {
@@ -192,6 +218,10 @@ void ServiceEngine::stopMonitoring() {
         if (rescanDebounceTimer_) {
             dispatch_source_cancel(rescanDebounceTimer_);
             rescanDebounceTimer_ = nullptr;
+        }
+        if (networkRescanTimer_) {
+            dispatch_source_cancel(networkRescanTimer_);
+            networkRescanTimer_ = nullptr;
         }
         pendingRescanPaths_.clear();
         lastRescanTime_.clear();

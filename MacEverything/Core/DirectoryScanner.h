@@ -36,6 +36,10 @@ public:
     };
 
     void scan(const std::string& rootPath);
+    // Additional scan roots (e.g. network volumes under /Volumes). Must be
+    // called before scan(). Best-effort: roots that cannot be stat'ed are
+    // skipped with a warning; they never fail the whole scan.
+    void addExtraRoot(const std::string& root) { extraRoots_.push_back(root); }
     void cancel() { cancelled_.store(true, std::memory_order_relaxed); }
     bool isCancelled() const { return cancelled_.load(std::memory_order_relaxed); }
     // True when scan() refused to run because the root path was empty or
@@ -59,6 +63,10 @@ private:
     std::unordered_set<InodeKey, InodeKeyHash> visitedDirs_;
     std::mutex dedupMutex_;
     dev_t rootDevId_{0};  // device ID of root path — skip cross-mount directories
+    std::vector<std::string> extraRoots_;
+    // Device IDs of extra roots (network volumes); their subtrees are exempt
+    // from the cross-mount skip. Written only in scan() before threads start.
+    std::unordered_set<dev_t> allowedDevs_;
 
     std::vector<std::vector<FileRecord>> threadResults_;
     Stats stats_;
